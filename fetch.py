@@ -80,71 +80,97 @@ def extract_auctions_waiting(text: str) -> str:
     return section
 
 
+
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
         return []
 
-    date_pattern = re.compile(
-        r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
-        re.IGNORECASE,
-    )
-
-    case_starts = list(re.finditer(r"Case\s*#\s*:", section_text, re.IGNORECASE))
-    if not case_starts:
-        return []
+    lines = [clean_text(line) for line in section_text.splitlines()]
+    lines = [line for line in lines if line]
 
     rows = []
-    current_auction_date = ""
+    current_date = ""
+    current_record = None
+    pending_fields = {}
 
-    for i, case_match in enumerate(case_starts):
-        start = case_match.start()
-        end = case_starts[i + 1].start() if i + 1 < len(case_starts) else len(section_text)
+    def finalize_record(record):
+        if not record:
+            return
 
-        prefix_start = case_starts[i - 1].end() if i > 0 else 0
-        prefix = section_text[prefix_start:start]
-        date_match = list(date_pattern.finditer(prefix))
-        if date_match:
-            current_auction_date = clean_text(date_match[-1].group(1))
-
-        block = clean_text(section_text[start:end])
-        if not block:
-            continue
-
-        def grab(pattern: str, default: str = "") -> str:
-            m = re.search(pattern, block, re.IGNORECASE | re.DOTALL)
-            return clean_text(m.group(1)) if m else default
-
-        case_no = grab(
-            r"Case\s*#\s*:\s*(.*?)(?=Final Judgment Amount:|Parcel ID:|Property Address:|Assessed Value:|Plaintiff Max Bid:|Auction Type:|$)"
-        )
+        case_no = clean_text(record.get("Case #", ""))
         if not case_no:
-            continue
+            return
 
-        auction_date = grab(
-            r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
-            current_auction_date,
-        ) or current_auction_date
-
-        judgment = grab(r"Final Judgment Amount\s*:?\s*(\$[\d,]+\.\d{2}|Hidden|\$0\.00|0\.00)")
-        parcel_id = grab(r"Parcel ID\s*:?\s*([^\s]+)")
-        address = grab(
-            r"Property Address\s*:?\s*(.*?)(?=Assessed Value:|Plaintiff Max Bid:|Auction Type:|Case\s*#:|Final Judgment Amount:|Parcel ID:|$)"
-        )
-        assessed = grab(r"Assessed Value\s*:?\s*(\$[\d,]+\.\d{2}|Hidden|\$0\.00|0\.00)")
-        max_bid = grab(r"Plaintiff Max Bid\s*:?\s*(\$[\d,]+\.\d{2}|Hidden|\$0\.00|0\.00)")
+        parcel_id = clean_text(record.get("Parcel ID", ""))
 
         rows.append({
-            "Auction Date": auction_date,
-            "Property Address": address,
-            "Final Judgment": judgment,
-            "Assessed Value": assessed,
-            "Plaintiff Max Bid": max_bid,
+            "Auction Date": clean_text(record.get("Auction Date", "")),
+            "Property Address": clean_text(record.get("Property Address", "")),
+            "Final Judgment": clean_text(record.get("Final Judgment", "")),
+            "Assessed Value": clean_text(record.get("Assessed Value", "")),
+            "Plaintiff Max Bid": clean_text(record.get("Plaintiff Max Bid", "")),
             "Case #": case_no,
             "Parcel ID": parcel_id,
             "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={case_no}&bypassPage=1",
-            "Parcel Link": f"https://qpublic.schneidercorp.com/Application.aspx?AppID=856&LayerID=16069&PageTypeID=4&KeyValue={parcel_id}" if parcel_id else "",
+            "Parcel Link": f"https://www.sc-pa.com/propertysearch/{parcel_id}" if parcel_id else "",
         })
 
+    label_patterns = [
+        ("Final Judgment", r"^Final Judgment Amount\s*:?\s*(.+)$"),
+        ("Parcel ID", r"^Parcel ID\s*:?\s*(.+)$"),
+        ("Property Address", r"^Property Address\s*:?\s*(.+)$"),
+        ("Assessed Value", r"^Assessed Value\s*:?\s*(.+)$"),
+        ("Plaintiff Max Bid", r"^Plaintiff Max Bid\s*:?\s*(.+)$"),
+    ]
+
+    for line in lines:
+        m_date = re.match(
+            r"^Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)$",
+            line,
+            re.IGNORECASE,
+        )
+        if m_date:
+            current_date = clean_text(m_date.group(1))
+            if current_record and not current_record.get("Auction Date"):
+                current_record["Auction Date"] = current_date
+            continue
+
+        m_case = re.match(r"^Case\s*#:\s*(.+)$", line, re.IGNORECASE)
+        if m_case:
+            finalize_record(current_record)
+
+            current_record = {
+                "Auction Date": current_date,
+                "Property Address": "",
+                "Final Judgment": "",
+                "Assessed Value": "",
+                "Plaintiff Max Bid": "",
+                "Case #": clean_text(m_case.group(1)),
+                "Parcel ID": "",
+            }
+
+            for key, value in pending_fields.items():
+                if value and not current_record.get(key):
+                    current_record[key] = value
+            pending_fields = {}
+            continue
+
+        matched_any = False
+        for key, pattern in label_patterns:
+            m = re.match(pattern, line, re.IGNORECASE)
+            if m:
+                value = clean_text(m.group(1))
+                if current_record is None:
+                    pending_fields[key] = value
+                elif not current_record.get(key):
+                    current_record[key] = value
+                matched_any = True
+                break
+
+        if matched_any:
+            continue
+
+    finalize_record(current_record)
     return rows
 
 
@@ -371,8 +397,6 @@ async def scrape():
                     rows = parse_waiting_records(waiting_text)
 
                     print(f"  Parsed {len(rows)} waiting records")
-                    if not rows:
-                        print("  DEBUG waiting text preview:", waiting_text[:1500])
 
                     for r in rows:
                         case_no = r["Case #"]
