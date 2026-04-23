@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from html import escape
 
-BASE_DOMAIN = "https://escambia.realforeclose.com/"
+BASE_DOMAIN = "https://sarasota.realforeclose.com/"
 CALENDAR_URL = f"{BASE_DOMAIN}/index.cfm?zaction=USER&zmethod=CALENDAR"
 
 DATA_DIR = "data"
@@ -80,45 +80,58 @@ def extract_auctions_waiting(text: str) -> str:
     return section
 
 
-
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
         return []
 
-    blocks = re.split(r"(?=Case\s*#?:)", section_text, flags=re.IGNORECASE)
+    date_pattern = re.compile(
+        r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
+        re.IGNORECASE,
+    )
+
+    case_starts = list(re.finditer(r"Case\s*#\s*:", section_text, re.IGNORECASE))
+    if not case_starts:
+        return []
+
     rows = []
     current_auction_date = ""
 
-    for block in blocks:
-        block = clean_text(block)
-        if not block or "Case #" not in block:
+    for i, case_match in enumerate(case_starts):
+        start = case_match.start()
+        end = case_starts[i + 1].start() if i + 1 < len(case_starts) else len(section_text)
+
+        prefix_start = case_starts[i - 1].end() if i > 0 else 0
+        prefix = section_text[prefix_start:start]
+        date_match = list(date_pattern.finditer(prefix))
+        if date_match:
+            current_auction_date = clean_text(date_match[-1].group(1))
+
+        block = clean_text(section_text[start:end])
+        if not block:
             continue
 
         def grab(pattern: str, default: str = "") -> str:
-            m = re.search(pattern, block, re.IGNORECASE)
+            m = re.search(pattern, block, re.IGNORECASE | re.DOTALL)
             return clean_text(m.group(1)) if m else default
 
         case_no = grab(
-            r"Case\s*#:\s*(.*?)(?=Final Judgment Amount:|Parcel ID:|Property Address:|Assessed Value:|Plaintiff Max Bid:|Auction Type:|$)"
+            r"Case\s*#\s*:\s*(.*?)(?=Final Judgment Amount:|Parcel ID:|Property Address:|Assessed Value:|Plaintiff Max Bid:|Auction Type:|$)"
         )
         if not case_no:
             continue
 
         auction_date = grab(
-            r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)"
-        )
-        if auction_date:
-            current_auction_date = auction_date
-        else:
-            auction_date = current_auction_date
+            r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
+            current_auction_date,
+        ) or current_auction_date
 
-        judgment = grab(r"Final Judgment Amount\s*:?\s*(\$[\d,]+\.\d{2}|Hidden)")
-        parcel_id = grab(r"Parcel ID\s*:?\s*([A-Za-z0-9\-\._]+)")
+        judgment = grab(r"Final Judgment Amount\s*:?\s*(\$[\d,]+\.\d{2}|Hidden|\$0\.00|0\.00)")
+        parcel_id = grab(r"Parcel ID\s*:?\s*([^\s]+)")
         address = grab(
-            r"Property Address\s*:?\s*(.*?)(?=Assessed Value:|Plaintiff Max Bid:|Auction Type:|Case #:|Final Judgment Amount:|Parcel ID:|$)"
+            r"Property Address\s*:?\s*(.*?)(?=Assessed Value:|Plaintiff Max Bid:|Auction Type:|Case\s*#:|Final Judgment Amount:|Parcel ID:|$)"
         )
-        assessed = grab(r"Assessed Value\s*:?\s*(\$[\d,]+\.\d{2}|Hidden)", "")
-        max_bid = grab(r"Plaintiff Max Bid\s*:?\s*(\$[\d,]+\.\d{2}|Hidden)")
+        assessed = grab(r"Assessed Value\s*:?\s*(\$[\d,]+\.\d{2}|Hidden|\$0\.00|0\.00)")
+        max_bid = grab(r"Plaintiff Max Bid\s*:?\s*(\$[\d,]+\.\d{2}|Hidden|\$0\.00|0\.00)")
 
         rows.append({
             "Auction Date": auction_date,
@@ -129,11 +142,10 @@ def parse_waiting_records(section_text: str) -> list[dict]:
             "Case #": case_no,
             "Parcel ID": parcel_id,
             "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={case_no}&bypassPage=1",
-            "Parcel Link": f"https://pcpao.gov/Parcel-Details/{parcel_id}",
+            "Parcel Link": f"https://qpublic.schneidercorp.com/Application.aspx?AppID=856&LayerID=16069&PageTypeID=4&KeyValue={parcel_id}" if parcel_id else "",
         })
 
     return rows
-
 
 
 def write_daily(rows: list[dict]) -> None:
@@ -359,6 +371,8 @@ async def scrape():
                     rows = parse_waiting_records(waiting_text)
 
                     print(f"  Parsed {len(rows)} waiting records")
+                    if not rows:
+                        print("  DEBUG waiting text preview:", waiting_text[:1500])
 
                     for r in rows:
                         case_no = r["Case #"]
