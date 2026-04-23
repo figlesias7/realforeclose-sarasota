@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from html import escape
 
-BASE_DOMAIN = "https://escambia.realforeclose.com/"
+BASE_DOMAIN = "https://sarasota.realforeclose.com/"
 CALENDAR_URL = f"{BASE_DOMAIN}/index.cfm?zaction=USER&zmethod=CALENDAR"
 
 DATA_DIR = "data"
@@ -80,52 +80,50 @@ def extract_auctions_waiting(text: str) -> str:
     return section
 
 
-
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
         return []
 
-    blocks = re.split(r"(?=Case\s*#?:)", section_text, flags=re.IGNORECASE)
+    pattern = re.compile(
+        r"Auction Starts\s*(?P<auction_date>\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET).*?"
+        r"Case #:\s*(?P<case>\S+).*?"
+        r"Final Judgment Amount:\s*(?P<judgment>\$[\d,]+\.\d{2}|Hidden).*?"
+        r"Parcel ID:\s*(?P<parcel>\S+).*?"
+        r"Property Address:\s*(?P<address>.*?)"
+        r"Assessed Value:\s*(?P<assessed>\$[\d,]+\.\d{2}|Hidden).*?"
+        r"Plaintiff Max Bid:\s*(?P<max_bid>\$[\d,]+\.\d{2}|Hidden)",
+        re.DOTALL | re.IGNORECASE,
+    )
+
     rows = []
-    current_auction_date = ""
 
-    for block in blocks:
-        block = clean_text(block)
-        if not block or "Case #" not in block:
-            continue
+    for match in pattern.finditer(section_text):
+        address = clean_text(match.group("address"))
 
-        def grab(pattern: str, default: str = "") -> str:
-            m = re.search(pattern, block, re.IGNORECASE)
-            return clean_text(m.group(1)) if m else default
+        cut_markers = [
+            "Plaintiff Max Bid:",
+            "Auction Starts",
+            "Auction Type:",
+            "Case #:",
+            "Final Judgment Amount:",
+            "Parcel ID:",
+            "Property Address:",
+            "Assessed Value:",
+        ]
+        for marker in cut_markers:
+            pos = address.find(marker)
+            if pos != -1:
+                address = address[:pos].strip()
 
-        case_no = grab(
-            r"Case\s*#:\s*(.*?)(?=Final Judgment Amount:|Parcel ID:|Property Address:|Assessed Value:|Plaintiff Max Bid:|Auction Type:|$)"
-        )
-        if not case_no:
-            continue
-
-        auction_date = grab(
-            r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)"
-        )
-        if auction_date:
-            current_auction_date = auction_date
-        else:
-            auction_date = current_auction_date
-
-        judgment = grab(r"Final Judgment Amount\s*:?\s*(\$[\d,]+\.\d{2}|Hidden)")
-        parcel_id = grab(r"Parcel ID\s*:?\s*([A-Za-z0-9\-\._]+)")
-        address = grab(
-            r"Property Address\s*:?\s*(.*?)(?=Assessed Value:|Plaintiff Max Bid:|Auction Type:|Case #:|Final Judgment Amount:|Parcel ID:|$)"
-        )
-        assessed = grab(r"Assessed Value\s*:?\s*(\$[\d,]+\.\d{2}|Hidden)", "")
-        max_bid = grab(r"Plaintiff Max Bid\s*:?\s*(\$[\d,]+\.\d{2}|Hidden)")
+        case_no = clean_text(match.group("case"))
+        parcel_id = clean_text(match.group("parcel"))
 
         rows.append({
-            "Auction Date": auction_date,
+            "Auction Date": clean_text(match.group("auction_date")),
             "Property Address": address,
-            "Final Judgment": judgment,
-            "Assessed Value": assessed,
-            "Plaintiff Max Bid": max_bid,
+            "Final Judgment": clean_text(match.group("judgment")),
+            "Assessed Value": clean_text(match.group("assessed")),
+            "Plaintiff Max Bid": clean_text(match.group("max_bid")),
             "Case #": case_no,
             "Parcel ID": parcel_id,
             "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={case_no}&bypassPage=1",
@@ -133,7 +131,6 @@ def parse_waiting_records(section_text: str) -> list[dict]:
         })
 
     return rows
-
 
 
 def write_daily(rows: list[dict]) -> None:
