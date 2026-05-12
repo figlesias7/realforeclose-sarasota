@@ -80,26 +80,6 @@ def extract_auctions_waiting(text: str) -> str:
     return section
 
 
-def extract_auction_date_from_page(text: str) -> str:
-    """
-    Sarasota sometimes shows the auction date above the Auctions Waiting block.
-    The parser only receives that block, so use the full page as a fallback.
-    """
-    cleaned = clean_text(text)
-
-    patterns = [
-        r"Auction Starts\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
-        r"Auction Date\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
-        r"Sale Date\s*:?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*[AP]M(?:\s*ET)?)?)",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, cleaned, re.IGNORECASE)
-        if m:
-            return clean_text(m.group(1))
-
-    return ""
-
 
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
@@ -413,14 +393,8 @@ async def scrape():
                     await page.wait_for_timeout(5000)
 
                     body_text = await page.locator("body").inner_text()
-                    page_auction_date = extract_auction_date_from_page(body_text)
                     waiting_text = extract_auctions_waiting(body_text)
                     rows = parse_waiting_records(waiting_text)
-
-                    if page_auction_date:
-                        for row in rows:
-                            if not row.get("Auction Date"):
-                                row["Auction Date"] = page_auction_date
 
                     print(f"  Parsed {len(rows)} waiting records")
 
